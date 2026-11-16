@@ -25,7 +25,52 @@ CREATE TABLE IF NOT EXISTS runs (
     input_json    TEXT NOT NULL,
     counts_json   TEXT NOT NULL,
     totals_json   TEXT NOT NULL,
-    elapsed_ms    INTEGER NOT NULL
+    elapsed_ms    INTEGER NOT NULL,
+    run_kind      TEXT NOT NULL DEFAULT 'BASE',
+    base_run_id   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS revisions (
+    revision_id     TEXT PRIMARY KEY,
+    base_run_id     TEXT NOT NULL,
+    corrected_run_id TEXT,
+    revision_key    TEXT NOT NULL UNIQUE,
+    status          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    applied_at      TEXT,
+    old_offset_name TEXT NOT NULL,
+    new_offset_name TEXT NOT NULL,
+    old_offset_sha  TEXT NOT NULL,
+    new_offset_sha  TEXT NOT NULL,
+    affected_windows INTEGER NOT NULL DEFAULT 0,
+    moved_samples   INTEGER NOT NULL DEFAULT 0,
+    summary_json    TEXT NOT NULL,
+    error_code      TEXT,
+    error_message   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS revision_impact (
+    revision_id   TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    sensor_id     TEXT NOT NULL,
+    bucket_utc    TEXT,
+    window_start  TEXT,
+    old_bucket    TEXT,
+    new_bucket    TEXT,
+    old_window    TEXT,
+    new_window    TEXT,
+    crossed       INTEGER NOT NULL,
+    old_observed  INTEGER,
+    new_observed  INTEGER,
+    old_expected  INTEGER,
+    new_expected  INTEGER,
+    old_coverage  TEXT,
+    new_coverage  TEXT,
+    old_state     TEXT,
+    new_state     TEXT,
+    source_row    INTEGER,
+    old_offset    INTEGER,
+    new_offset    INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS intake (
@@ -127,6 +172,9 @@ CREATE INDEX IF NOT EXISTS idx_grid_run ON grid(run_id);
 CREATE INDEX IF NOT EXISTS idx_windows_run ON windows(run_id);
 CREATE INDEX IF NOT EXISTS idx_reconcile_run ON reconcile(run_id);
 CREATE INDEX IF NOT EXISTS idx_duplicates_run ON duplicates(run_id);
+CREATE INDEX IF NOT EXISTS idx_revisions_base ON revisions(base_run_id);
+CREATE INDEX IF NOT EXISTS idx_runs_base ON runs(base_run_id);
+CREATE INDEX IF NOT EXISTS idx_revision_impact ON revision_impact(revision_id, kind);
 """
 
 

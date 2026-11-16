@@ -63,6 +63,8 @@ SAMPLES = {
 
 OFFSET_SAMPLES = {
     "device_offsets": ("device_offsets.csv", "设备偏移表"),
+    "device_offsets_corrected": ("device_offsets_corrected.csv", "设备偏移表·纠错版"),
+    "device_offsets_bad": ("device_offsets_bad.csv", "设备偏移表·坏表样例"),
 }
 
 

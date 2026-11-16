@@ -56,3 +56,12 @@
 | 仅表头 | `HEADER_ONLY` | 声明了列但没有数据行 |
 
 三种空态都会生成批次，四账按 0 对 0 判平，结论码显示在总览页。
+
+## 批次版本与校准修订
+
+- `runs.run_kind`：`BASE` 为正式导入批次，`REVISED` 为校准修订产出的更正批次；`runs.base_run_id` 在修订批次上指回基批，基批该列为空。
+- 同输入（采样文件 + 偏移表 sha256）同规则版本同参数派生唯一 `run_key`，全局唯一；修订回到与某既有批次相同的输入时直接复用该批次，不插重复行。
+- `revisions` 表一条修订一行：`revision_key` 由「基批 run_key + 纠错表 sha256 + 规则版本」派生，状态机为 `PREVIEWED → APPLIED`，解析失败记 `FAILED`；同键重跑只返回既有行。
+- `revision_impact` 按 `kind=MOVED/WINDOW` 存迁移采样与受影响窗口的旧/新对照；`crossed=1` 表示采样跨过 15 分钟窗口边界或窗口覆盖状态翻转。
+- 修订不改写基批任何表：基批的 samples / grid / windows / offsets / quarantine / duplicates / reconcile / intake 八张表按旧 `run_id` 原样保留，证据链与 M7 导出持续可用。
+- 修订批次的四账独立核算，规则与正式导入完全相同（共用同一条流水线），`balanced` 仍按四条账差额是否为 0 判定。

@@ -42,6 +42,8 @@ docker compose exec -T app python -m pytest -q
 | `empty` | `sample_data/empty_sample.csv` | 0 字节 |
 
 偏移表固定用 `device_offsets.csv`；其中 `AM-06` 故意留两段重叠区间。
+校准修订演练用 `device_offsets_corrected.csv`（TH-01 偏移 20s→95s，采样跨过 15 分钟边界）；
+`device_offsets_bad.csv` 区间倒置，用于演练修订失败保旧版。
 
 ## 接口
 
@@ -64,6 +66,22 @@ docker compose exec -T app python -m pytest -q
 | GET | `/api/export/quarantine.csv` | 隔离 CSV |
 | GET | `/api/export/manifest.json` | 运行清单 |
 | GET | `/api/export/evidence` | 单元格证据，参数 `sensor_id` 与 `bucket` |
+| POST | `/api/revisions/preview` | 预览修订影响窗口，body `{"run_id": "...", "offsets": "device_offsets_corrected"}` |
+| POST | `/api/revisions/apply` | 确认修订并落独立 REVISED 批次，同修订重跑幂等 |
+| GET | `/api/revisions` | 修订记录清单，可按 `run_id` 过滤基批 |
+| GET | `/api/revisions/{revision_id}` | 单条修订的影响窗口与迁移采样明细 |
+| GET | `/api/revisions/{revision_id}/windows.csv` | 受影响窗口旧/新对照 CSV |
+| GET | `/api/revisions/{revision_id}/moved.csv` | 迁移采样旧/新桶与跨窗标记 CSV |
+
+## 时钟校准修订（设备时钟纠错）
+
+适用场景：设备时钟校准表纠错后，上一班已入库遥测仍按旧偏移落格，部分采样跨过 15 分钟边界。
+
+1. 在 `/batches` 选基批与纠错偏移表，先「预览影响窗口」：返回迁移采样、跨边界条数与受影响窗口，不写批次数据。
+2. 值班员核对无误后「确认修订」：系统重放同一采样文件，按新表重算分钟桶、去重、缺口、补齐与窗口覆盖，落 `run_kind=REVISED` 的独立批次，`base_run_id` 指回基批。
+3. 旧批次一行不改，七张表（samples/grid/windows/offsets/quarantine/duplicates/reconcile/intake）按旧 `run_id` 全部可追回；两个版本都能走 M7 导出。
+4. 同一基批 + 同一纠错表的修订键固定，重复预览/确认只复用，不新增更正版本、不重复计入。
+5. 纠错表解析失败（如区间倒置）返回 400 `OFFSET_TABLE_INVALID`，只登记一条 `FAILED` 审计行，不产生任何批次数据，正式结果保留旧版。
 
 ## 常见失败
 
@@ -73,3 +91,5 @@ docker compose exec -T app python -m pytest -q
 | 400 `HEADER_MISSING` | 输入列名不在别名表内 | 在 `app/modules/m1_intake/sniff.py` 的别名表补一条 |
 | 404 `RUN_NOT_FOUND` | 指定了不存在的批次号 | 省略 `run_id` 参数即取最近批次 |
 | 四账「不平」 | 有人改了落库行 | 用 `POST /api/grid` 与 `POST /api/gaps/repair` 重新推导比对，差额在 `/batches` 可见 |
+| 400 `OFFSET_TABLE_INVALID` | 纠错偏移表区间倒置或无法解析 | 修订未生效，旧批次仍是正式结果；修好坏表后重新提交，失败只留 FAILED 审计行 |
+| 修订点了两次出现两个更正批次 | 正常不会发生：`revision_key` 唯一约束保证同修订只落一版 | 查 `GET /api/revisions`，确认每条修订只有一条 `APPLIED` 记录 |

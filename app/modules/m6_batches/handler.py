@@ -6,7 +6,9 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 
 from app import store, web
+from app.modules.m1_intake import service as intake_service
 from app.modules.m7_export import service as export_service
+from app.modules.m8_revision import service as revision_service
 
 from . import service
 
@@ -20,6 +22,7 @@ def batches_page(request: Request):
         view = service.runs_view(conn)
         reconcile = None
         exports = None
+        revisions = revision_service.list_view(conn)
         if view["runs"]:
             run_id = view["latest"]["run_id"]
             reconcile = service.reconcile_view(conn, run_id)
@@ -27,7 +30,14 @@ def batches_page(request: Request):
     finally:
         conn.close()
     return web.render(
-        request, "batches.html", "batches", view=view, rec=reconcile, exports=exports
+        request,
+        "batches.html",
+        "batches",
+        view=view,
+        rec=reconcile,
+        exports=exports,
+        revisions=revisions,
+        offset_choices=intake_service.offset_choices(),
     )
 
 

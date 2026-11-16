@@ -94,3 +94,34 @@ def test_watermark_monotonic_across_replay(conn, run_main):
     ]
     assert late_before == late_after
     assert len(late_before) == MAIN["late"]
+
+
+def test_revision_never_mutates_base_tables(conn, run_main):
+    """修订不变量：更正批次的每一张表都写新 run_id，基批七张表逐行不变。"""
+    from app.modules.m8_revision import service as revision_service
+
+    tables = ("samples", "grid", "windows", "offsets", "quarantine", "duplicates", "reconcile", "intake")
+    before = {
+        name: [dict(row) for row in store.rows(conn, f"SELECT * FROM {name} WHERE run_id = ?", (run_main["run_id"],))]
+        for name in tables
+    }
+    revision_service.apply(conn, run_id=run_main["run_id"], offsets="device_offsets_corrected")
+    after = {
+        name: [dict(row) for row in store.rows(conn, f"SELECT * FROM {name} WHERE run_id = ?", (run_main["run_id"],))]
+        for name in tables
+    }
+    assert before == after
+
+
+def test_revision_idempotent_under_repeated_apply(conn, run_main):
+    """修订不变量：同一修订连跑三次，修订表、批次表与影响明细都不重复计入。"""
+    from app.modules.m8_revision import service as revision_service
+
+    first = revision_service.apply(conn, run_id=run_main["run_id"], offsets="device_offsets_corrected")
+    for _ in range(2):
+        again = revision_service.apply(conn, run_id=run_main["run_id"], offsets="device_offsets_corrected")
+        assert again["revision"]["revision_id"] == first["revision"]["revision_id"]
+    assert store.value(conn, "SELECT COUNT(*) FROM revisions", (), 0) == 1
+    assert store.value(conn, "SELECT COUNT(*) FROM runs WHERE run_kind = 'REVISED'", (), 0) == 1
+    impact_rows = store.value(conn, "SELECT COUNT(*) FROM revision_impact", (), 0)
+    assert impact_rows == first["impact"]["moved_samples"] + first["impact"]["affected_windows"]

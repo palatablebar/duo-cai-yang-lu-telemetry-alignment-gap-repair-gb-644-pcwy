@@ -1,6 +1,8 @@
 """批次编排：一次导入跑完采信 → 时基 → 质量 → 网格 → 缺口，落库并核四账。
 
 幂等由 run_key 唯一约束保证；落库整体在一个事务里，异常回滚不留半张表。
+时钟校准修订（M8）复用同一条流水线，只换偏移表，规则版本与参数保持不变，
+因此「正式导入」与「修订重算」不会走出两套口径。
 """
 
 from __future__ import annotations
@@ -63,6 +65,8 @@ def _result(conn, run: dict, *, reused: bool, lines: list[compare.ReconcileLine]
         "created_at": run["created_at"],
         "sample": run["sample_name"],
         "offsets": run["offset_name"],
+        "run_kind": run["run_kind"],
+        "base_run_id": run["base_run_id"],
         "reused": reused,
         "counts": run["counts"],
         "totals": run["totals"],
@@ -76,24 +80,11 @@ def _result(conn, run: dict, *, reused: bool, lines: list[compare.ReconcileLine]
     }
 
 
-def execute_run(conn, *, sample: str, offsets: str) -> dict:
-    started = time.monotonic()
-    loaded = intake_service.load_sample(sample)
-    table = timebase_service.load_offsets(offsets)
+def _build_pipeline(loaded, table) -> dict:
+    """跑采信 → 时基 → 质量 → 网格 → 缺口，返回落库所需的全部中间结果。
 
-    inputs = [
-        {"name": loaded.file_name, "sha256": loaded.sha256, "bytes": loaded.size},
-        {"name": table.file_name, "sha256": table.sha256, "bytes": table.size},
-    ]
-    params = _params()
-    key = manifest.run_key(inputs, config.RULE_VERSION, params)
-
-    existing = history.find_by_key(conn, key)
-    if existing is not None:
-        return _result(conn, existing, reused=True, lines=_lines_of(conn, existing["run_id"]))
-
-    run_id = manifest.run_id_for(key)
-
+    纯计算、不碰数据库；正式导入与修订重算共用此函数，保证口径一致。
+    """
     normalized = timebase_service.normalize(loaded, table)
     judged = quality_service.judge_all(normalized.rows)
 
@@ -159,75 +150,144 @@ def execute_run(conn, *, sample: str, offsets: str) -> dict:
         "filled_sum": str(_q(filled_sum)),
         "grid_sum": str(_q(observed_sum + filled_sum)),
     }
+    return {
+        "table": table,
+        "aligned": aligned,
+        "analysis": analysis,
+        "repaired": repaired,
+        "rejects": rejects,
+        "counts": counts,
+        "totals": totals,
+        "intake": {
+            "encoding": loaded.encoding,
+            "bom": loaded.bom,
+            "delimiter": loaded.delimiter,
+            "header": list(loaded.header),
+            "segments": loaded.segments,
+            "blank_lines": loaded.blank_lines,
+            "truncated": loaded.truncated,
+            "byte_size": loaded.size,
+            "sha256": loaded.sha256,
+        },
+    }
 
+
+def _write_pipeline(
+    conn, *, run_id, loaded, key, params, pipeline, run_kind, base_run_id, started_at
+) -> dict:
+    """把流水线结果写入当前事务；调用方负责包裹事务边界。"""
+    counts = dict(pipeline["counts"])
+    totals = pipeline["totals"]
+    table = pipeline["table"]
+    aligned = pipeline["aligned"]
+    analysis = pipeline["analysis"]
+    repaired = pipeline["repaired"]
+    inputs = [
+        {"name": loaded.file_name, "sha256": loaded.sha256, "bytes": loaded.size},
+        {"name": table.file_name, "sha256": table.sha256, "bytes": table.size},
+    ]
     created_at = history.now_text()
-    lines: list[compare.ReconcileLine] = []
+    timebase_service.store_offsets(conn, run_id, table.entries)
+    quality_service.persist_samples(conn, run_id, aligned.kept)
+    grid_service.persist_duplicates(conn, run_id, aligned.duplicates)
+    gaps_service.persist_grid(conn, run_id, repaired.points)
+    gaps_service.persist_windows(conn, run_id, analysis.windows if analysis else [])
+    quarantine_store.write(conn, run_id, pipeline["rejects"])
+
+    counts["windows_stored"] = int(
+        store.value(conn, "SELECT COUNT(*) FROM windows WHERE run_id = ?", (run_id,), 0)
+    )
+    lines = compare.reconcile_lines(counts, totals)
+    counts["balanced"] = compare.is_balanced(lines)
+
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    history.save(
+        conn,
+        {
+            "run_id": run_id,
+            "run_key": key,
+            "created_at": created_at,
+            "rule_version": config.RULE_VERSION,
+            "sample_name": loaded.file_name,
+            "offset_name": table.file_name,
+            "params": params,
+            "inputs": inputs,
+            "counts": counts,
+            "totals": totals,
+            "elapsed_ms": elapsed_ms,
+            "run_kind": run_kind,
+            "base_run_id": base_run_id,
+        },
+    )
+    history.save_intake(conn, run_id, pipeline["intake"])
+    store.insert_many(
+        conn,
+        RECONCILE_INSERT,
+        [
+            (
+                run_id,
+                line.line_no,
+                line.name,
+                str(line.expected),
+                str(line.actual),
+                str(line.delta),
+                line.state,
+                line.note,
+            )
+            for line in lines
+        ],
+    )
+    return history.get(conn, run_id)
+
+
+def _persist_pipeline(
+    conn, *, run_id, loaded, key, params, pipeline, run_kind, base_run_id, started_at
+) -> dict:
+    """把流水线结果整体落进一个事务；异常回滚，不留半张表。"""
     with store.transaction(conn):
-        timebase_service.store_offsets(conn, run_id, table.entries)
-        quality_service.persist_samples(conn, run_id, aligned.kept)
-        grid_service.persist_duplicates(conn, run_id, aligned.duplicates)
-        gaps_service.persist_grid(conn, run_id, repaired.points)
-        gaps_service.persist_windows(conn, run_id, analysis.windows if analysis else [])
-        quarantine_store.write(conn, run_id, rejects)
-
-        counts["windows_stored"] = int(
-            store.value(conn, "SELECT COUNT(*) FROM windows WHERE run_id = ?", (run_id,), 0)
-        )
-        lines = compare.reconcile_lines(counts, totals)
-        counts["balanced"] = compare.is_balanced(lines)
-
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        history.save(
+        return _write_pipeline(
             conn,
-            {
-                "run_id": run_id,
-                "run_key": key,
-                "created_at": created_at,
-                "rule_version": config.RULE_VERSION,
-                "sample_name": loaded.file_name,
-                "offset_name": table.file_name,
-                "params": params,
-                "inputs": inputs,
-                "counts": counts,
-                "totals": totals,
-                "elapsed_ms": elapsed_ms,
-            },
-        )
-        history.save_intake(
-            conn,
-            run_id,
-            {
-                "encoding": loaded.encoding,
-                "bom": loaded.bom,
-                "delimiter": loaded.delimiter,
-                "header": list(loaded.header),
-                "segments": loaded.segments,
-                "blank_lines": loaded.blank_lines,
-                "truncated": loaded.truncated,
-                "byte_size": loaded.size,
-                "sha256": loaded.sha256,
-            },
-        )
-        store.insert_many(
-            conn,
-            RECONCILE_INSERT,
-            [
-                (
-                    run_id,
-                    line.line_no,
-                    line.name,
-                    str(line.expected),
-                    str(line.actual),
-                    str(line.delta),
-                    line.state,
-                    line.note,
-                )
-                for line in lines
-            ],
+            run_id=run_id,
+            loaded=loaded,
+            key=key,
+            params=params,
+            pipeline=pipeline,
+            run_kind=run_kind,
+            base_run_id=base_run_id,
+            started_at=started_at,
         )
 
-    run = history.get(conn, run_id)
-    return _result(conn, run, reused=False, lines=lines)
+
+def execute_run(conn, *, sample: str, offsets: str) -> dict:
+    started_at = time.monotonic()
+    loaded = intake_service.load_sample(sample)
+    table = timebase_service.load_offsets(offsets)
+
+    inputs = [
+        {"name": loaded.file_name, "sha256": loaded.sha256, "bytes": loaded.size},
+        {"name": table.file_name, "sha256": table.sha256, "bytes": table.size},
+    ]
+    params = _params()
+    key = manifest.run_key(inputs, config.RULE_VERSION, params)
+
+    existing = history.find_by_key(conn, key)
+    if existing is not None:
+        return _result(conn, existing, reused=True, lines=_lines_of(conn, existing["run_id"]))
+
+    run_id = manifest.run_id_for(key)
+    pipeline = _build_pipeline(loaded, table)
+    run = _persist_pipeline(
+        conn,
+        run_id=run_id,
+        loaded=loaded,
+        key=key,
+        params=params,
+        pipeline=pipeline,
+        run_kind="BASE",
+        base_run_id=None,
+        started_at=started_at,
+    )
+    return _result(conn, run, reused=False, lines=_lines_of(conn, run_id))
 
 
 def _stages(counts: dict) -> list[dict]:

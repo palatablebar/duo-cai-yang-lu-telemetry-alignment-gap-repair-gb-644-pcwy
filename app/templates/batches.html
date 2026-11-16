@@ -20,8 +20,8 @@
   <div class="scroll">
     <table class="sheet-grid wide" data-sheet>
       <thead>
-        <tr class="letters"><th class="gutter"></th><th>A</th><th>B</th><th class="num">C</th><th class="num">D</th><th class="num">E</th><th class="num">F</th><th>G</th></tr>
-        <tr class="cols"><th class="gutter">#</th><th>批次号</th><th>生成</th><th class="num">原始</th><th class="num">采纳</th><th class="num">隔离</th><th class="num">网格</th><th>四账</th></tr>
+        <tr class="letters"><th class="gutter"></th><th>A</th><th>B</th><th class="num">C</th><th class="num">D</th><th class="num">E</th><th class="num">F</th><th>G</th><th>H</th></tr>
+        <tr class="cols"><th class="gutter">#</th><th>批次号</th><th>生成</th><th class="num">原始</th><th class="num">采纳</th><th class="num">隔离</th><th class="num">网格</th><th>四账</th><th>版本</th></tr>
       </thead>
       <tbody>
         {% for run in view.runs %}
@@ -34,7 +34,112 @@
           <td tabindex="0" class="num">{{ run.quarantined }}</td>
           <td tabindex="0" class="num">{{ run.grid_points }}</td>
           <td tabindex="0"><span class="tag {{ 'ok' if run.balanced else 'bad' }}">{{ "平" if run.balanced else "不平" }}</span></td>
+          <td tabindex="0">
+            {% if run.run_kind == "REVISED" %}
+            <span class="tag warn">修订 · 源自 {{ run.base_run_id }}</span>
+            {% else %}
+            <span class="tag quiet">原始</span>
+            {% endif %}
+          </td>
         </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="block">
+  <div class="block-head">
+    <h2 class="h2">时钟校准修订</h2>
+    <span class="block-meta mono">旧版保留 · 同修订重跑不新增版本</span>
+  </div>
+  <form class="import" id="revision-form" autocomplete="off">
+    <label class="field">
+      <span class="field-k">基批</span>
+      <select name="run_id" id="revision-run">
+        {% for run in view.runs if run.run_kind == "BASE" %}
+        <option value="{{ run.run_id }}">{{ run.run_id }} · {{ run.sample_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span class="field-k">纠错偏移表</span>
+      <select name="offsets" id="revision-offsets">
+        {% for item in offset_choices %}<option value="{{ item.key }}">{{ item.label }}</option>{% endfor %}
+      </select>
+    </label>
+    <button class="btn ghost" type="button" id="revision-preview-btn">预览影响窗口</button>
+    <button class="btn" type="submit" id="revision-apply-btn">确认修订并落更正批次</button>
+    <span class="hint" id="revision-hint" role="status"></span>
+  </form>
+  <div id="revision-result" hidden>
+    <div class="scroll">
+      <table class="sheet-grid" id="revision-summary-table" data-sheet>
+        <thead>
+          <tr class="letters"><th class="gutter"></th><th>A</th><th class="num">B</th></tr>
+          <tr class="cols"><th class="gutter">#</th><th>项</th><th class="num">值</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="block-head">
+      <h3 class="h2">受影响的 15 分钟窗口</h3>
+      <a class="link mono" id="revision-windows-csv" href="#">窗口差异 CSV</a>
+    </div>
+    <div class="scroll">
+      <table class="sheet-grid" id="revision-windows-table" data-sheet>
+        <thead>
+          <tr class="letters"><th class="gutter"></th><th>A</th><th>B</th><th class="num">C</th><th class="num">D</th><th>E</th><th>F</th></tr>
+          <tr class="cols"><th class="gutter">#</th><th>传感器</th><th>窗口起点</th><th class="num">实有 旧→新</th><th class="num">覆盖度 旧→新</th><th>状态 旧→新</th><th>跨边界采样</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="block-head">
+      <h3 class="h2">迁移采样</h3>
+      <a class="link mono" id="revision-moved-csv" href="#">迁移采样 CSV</a>
+    </div>
+    <div class="scroll">
+      <table class="sheet-grid wide" id="revision-moved-table" data-sheet>
+        <thead>
+          <tr class="letters"><th class="gutter"></th><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th></tr>
+          <tr class="cols"><th class="gutter">#</th><th>原始行</th><th>传感器</th><th>桶 旧→新</th><th>窗口 旧→新</th><th class="num">偏移 旧→新</th><th>跨窗</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="block-head">
+    <h2 class="h2">修订记录</h2>
+    <span class="block-meta mono">{{ revisions.count }} 条 · 成功 {{ revisions.applied }} · 失败 {{ revisions.failed }}</span>
+  </div>
+  <div class="scroll">
+    <table class="sheet-grid wide" data-sheet>
+      <thead>
+        <tr class="letters"><th class="gutter"></th><th>A</th><th>B</th><th>C</th><th>D</th><th class="num">E</th><th class="num">F</th><th>G</th></tr>
+        <tr class="cols"><th class="gutter">#</th><th>修订号</th><th>基批</th><th>状态</th><th>纠错表</th><th class="num">影响窗口</th><th class="num">迁移采样</th><th>失败原因</th></tr>
+      </thead>
+      <tbody>
+        {% for rev in revisions.revisions %}
+        <tr>
+          <th class="gutter">{{ loop.index }}</th>
+          <td tabindex="0" class="mono">{{ rev.revision_id }}</td>
+          <td tabindex="0" class="mono">{{ rev.base_run_id }}</td>
+          <td tabindex="0">
+            {% if rev.status == "APPLIED" %}<span class="tag ok">已生效</span>
+            {% elif rev.status == "PREVIEWED" %}<span class="tag quiet">待确认</span>
+            {% else %}<span class="tag bad">失败·旧版保留</span>{% endif %}
+          </td>
+          <td tabindex="0">{{ rev.new_offset_name }}</td>
+          <td tabindex="0" class="num">{{ rev.affected_windows }}</td>
+          <td tabindex="0" class="num">{{ rev.moved_samples }}</td>
+          <td tabindex="0">{{ rev.error_message or "—" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="empty-text">还没有修订记录。</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -86,6 +191,7 @@
         <tr><th class="gutter">3</th><td tabindex="0">样例</td><td tabindex="0">{{ rec.run.sample_name }}</td></tr>
         <tr><th class="gutter">4</th><td tabindex="0">偏移表</td><td tabindex="0">{{ rec.run.offset_name }}</td></tr>
         <tr><th class="gutter">5</th><td tabindex="0">耗时</td><td tabindex="0" class="num">{{ rec.run.elapsed_ms }} ms</td></tr>
+        <tr><th class="gutter">6</th><td tabindex="0">版本</th><td tabindex="0">{{ "修订批次（基批 " ~ rec.run.base_run_id ~ "）" if rec.run.run_kind == "REVISED" else "原始批次" }}</td></tr>
       </tbody>
     </table>
   </div>
@@ -146,4 +252,8 @@
 {% else %}
 <section class="empty"><p class="empty-text">还没有批次记录。</p></section>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/revision.js"></script>
 {% endblock %}

@@ -66,12 +66,16 @@ def build_manifest(
     counts: dict,
     totals: dict,
     elapsed_ms: int,
+    run_kind: str = "BASE",
+    base_run_id: str | None = None,
 ) -> dict:
     return {
         "run_id": run_id,
         "run_key": key,
         "created_at": created_at,
         "rule_version": rule_version,
+        "run_kind": run_kind,
+        "base_run_id": base_run_id,
         "grid_resolution": "PT1M",
         "window_minutes": params.get("window_minutes"),
         "sample": sample_name,

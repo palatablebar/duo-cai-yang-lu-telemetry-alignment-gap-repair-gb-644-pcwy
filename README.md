@@ -15,6 +15,7 @@
 | M5 缺口修复 | 缺口段、补齐值、窗口覆盖 | `GET /api/gaps`、`POST /api/gaps/repair`、页面 `/gaps` |
 | M6 批次与对账 | 批次清单、四账、差异归因 | `GET /api/batches`、`GET /api/reconcile`、页面 `/batches` |
 | M7 导出 | 网格 / 采纳 / 隔离 CSV、运行清单、单元格证据 | `GET /api/export/*` |
+| M8 校准修订 | 预览受影响窗口、确认修订、修订记录与复核 CSV，旧版可追回 | `POST /api/revisions/preview`、`POST /api/revisions/apply`、页面 `/batches` |
 
 ## 核心规则
 
@@ -24,6 +25,15 @@
 - 缺口 ≤3 桶按传感器声明策略补齐（`hold` 取前值、`linear` 按桶距等分）并标 `FILLED`；>3 桶记 `GAP` 不插值；`linear` 缺后继锚点记 `EDGE_NO_ANCHOR`。
 - 窗口覆盖度 = 实有桶数 / 应有桶数（应有按采样率派生），低于 `0.8` 标 `PARTIAL`。
 - 迟到 = 桶早于「已见最大桶 − 15 分钟」，仍采纳，只标 `LATE_ARRIVAL`。
+- 校准修订不就地改旧批次：用纠错偏移表重放同一采样文件，落独立 `REVISED` 批次（`base_run_id` 指回基批），旧批次七张表逐行保留；同一修订按 `revision_key` 幂等，重跑不新增更正版本；修订失败只留 `FAILED` 审计行，正式结果仍是旧版。
+
+## 校准修订工作流（M8）
+
+1. `/batches` 页选基批与「设备偏移表·纠错版」（`device_offsets_corrected.csv`），点「预览影响窗口」。
+2. 预览给出迁移采样（含是否跨过 15 分钟边界）与受影响窗口的旧/新覆盖度对照，不落任何批次数据。
+3. 值班员确认后点「确认修订并落更正批次」：缺口、补齐与窗口覆盖按新桶整体重算，生成独立 `REVISED` 批次。
+4. 在「修订记录」下载窗口差异 CSV 与迁移采样 CSV；更正批次与旧批次都能用 M7 导出按 `run_id` 追回。
+5. 同一次修订重复提交只复用既有记录；坏表（如 `device_offsets_bad.csv`）返回 400 且旧版保持正式。
 
 ## 定义与已知不覆盖
 
@@ -59,9 +69,10 @@ docker compose exec -T app python -m pytest -q
 ```
 app/main.py config.py errors.py reasons.py manifest.py store.py web.py
 app/modules/m1_intake … m7_export
+app/modules/m8_revision  修订编排、影响窗口分析、复核 CSV
 app/templates  base.html + 6 页
-app/static     theme.css layout.css components.css app.js table.js grid.js
+app/static     theme.css layout.css components.css app.js table.js grid.js revision.js
 docs/          DEPTH.md DATA-DICTIONARY.md RUNBOOK.md
-sample_data/   11 个自带样例 + 1 个偏移表
-tests/         每模块 1 个测试文件 + e2e + invariants
+sample_data/   11 个自带样例 + 1 个偏移表 + 纠错版/坏表偏移表
+tests/         每模块 1 个测试文件 + e2e + invariants + m8 修订两套
 ```
